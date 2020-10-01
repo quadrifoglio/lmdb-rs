@@ -1,25 +1,10 @@
 use std::marker::PhantomData;
-use std::{
-    fmt,
-    mem,
-    ptr,
-    result,
-    slice,
-};
+use std::{fmt, mem, ptr, result, slice};
 
-use libc::{
-    c_uint,
-    c_void,
-    size_t,
-    EINVAL,
-};
+use libc::{c_uint, c_void, size_t, EINVAL};
 
 use database::Database;
-use error::{
-    lmdb_result,
-    Error,
-    Result,
-};
+use error::{lmdb_result, Error, Result};
 use ffi;
 use flags::WriteFlags;
 use transaction::Transaction;
@@ -70,6 +55,15 @@ pub trait Cursor<'txn> {
         Iter::new(self.cursor(), ffi::MDB_FIRST, ffi::MDB_NEXT)
     }
 
+    /// Iterate over database items in reverse order, starting from the end of the database.
+    ///
+    /// For databases with duplicate data items (`DatabaseFlags::DUP_SORT`), the
+    /// duplicate data items of each key will be returned before moving on to
+    /// the next key.
+    fn iter_rev(&mut self) -> Iter<'txn> {
+        Iter::new(self.cursor(), ffi::MDB_LAST, ffi::MDB_PREV)
+    }
+
     /// Iterate over database items starting from the given key.
     ///
     /// For databases with duplicate data items (`DatabaseFlags::DUP_SORT`), the
@@ -84,6 +78,22 @@ pub trait Cursor<'txn> {
             Err(error) => return Iter::Err(error),
         };
         Iter::new(self.cursor(), ffi::MDB_GET_CURRENT, ffi::MDB_NEXT)
+    }
+
+    /// Iterate over database items in reverse order, starting from the given key.
+    ///
+    /// For databases with duplicate data items (`DatabaseFlags::DUP_SORT`), the
+    /// duplicate data items of each key will be returned before moving on to
+    /// the next key.
+    fn iter_rev_from<K>(&mut self, key: K) -> Iter<'txn>
+    where
+        K: AsRef<[u8]>,
+    {
+        match self.get(Some(key.as_ref()), None, ffi::MDB_SET_RANGE) {
+            Ok(_) | Err(Error::NotFound) => (),
+            Err(error) => return Iter::Err(error),
+        };
+        Iter::new(self.cursor(), ffi::MDB_GET_CURRENT, ffi::MDB_PREV)
     }
 
     /// Iterate over duplicate database items. The iterator will begin with the
@@ -122,7 +132,7 @@ pub trait Cursor<'txn> {
             Err(Error::NotFound) => {
                 self.get(None, None, ffi::MDB_LAST).ok();
                 return Iter::new(self.cursor(), ffi::MDB_NEXT, ffi::MDB_NEXT);
-            },
+            }
             Err(error) => return Iter::Err(error),
         };
         Iter::new(self.cursor(), ffi::MDB_GET_CURRENT, ffi::MDB_NEXT_DUP)
@@ -335,7 +345,7 @@ impl<'txn> Iterator for Iter<'txn> {
                         error => Some(Err(Error::from_err_code(error))),
                     }
                 }
-            },
+            }
             &mut Iter::Err(err) => Some(Err(err)),
         }
     }
@@ -412,7 +422,7 @@ impl<'txn> Iterator for IterDup<'txn> {
                 } else {
                     None
                 }
-            },
+            }
             &mut IterDup::Err(err) => Some(Iter::Err(err)),
         }
     }
@@ -554,6 +564,42 @@ mod test {
         assert_eq!(
             vec!().into_iter().collect::<Vec<(&[u8], &[u8])>>(),
             cursor.iter_from(b"key6").collect::<Result<Vec<_>>>().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_iter_rev() {
+        let dir = TempDir::new("test").unwrap();
+        let env = Environment::new().open(dir.path()).unwrap();
+        let db = env.open_db(None).unwrap();
+
+        let mut items: Vec<(&[u8], &[u8])> =
+            vec![(b"key1", b"val1"), (b"key2", b"val2"), (b"key3", b"val3"), (b"key5", b"val5")];
+
+        {
+            let mut txn = env.begin_rw_txn().unwrap();
+            for &(ref key, ref data) in &items {
+                txn.put(db, key, data, WriteFlags::empty()).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+
+        items.reverse();
+
+        let txn = env.begin_ro_txn().unwrap();
+        let mut cursor = txn.open_ro_cursor(db).unwrap();
+
+        assert_eq!(items.clone(), cursor.iter_rev().collect::<Result<Vec<_>>>().unwrap());
+        assert_eq!(items.clone(), cursor.iter_rev_from("key5").collect::<Result<Vec<_>>>().unwrap());
+
+        assert_eq!(
+            items.clone().into_iter().skip(1).collect::<Vec<_>>(),
+            cursor.iter_rev_from("key3").collect::<Result<Vec<_>>>().unwrap()
+        );
+
+        assert_eq!(
+            items.clone().into_iter().skip(3).collect::<Vec<_>>(),
+            cursor.iter_rev_from("key1").collect::<Result<Vec<_>>>().unwrap()
         );
     }
 
